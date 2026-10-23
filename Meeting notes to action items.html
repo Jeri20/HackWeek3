@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meeting notes to action items</title>
+<style>
+:root{--bg:#f7f8f5;--surface:#fff;--ink:#1d2521;--muted:#5d6b64;--line:#d9dfda;--accent:#1f6f5c;--accent-ink:#fff;--warn-bg:#fff4d6;--warn-ink:#6b4a00;--error:#a3261d;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141a17;--surface:#1c2420;--ink:#e8eee9;--muted:#9aa8a0;--line:#2f3b35;--accent:#4fb89d;--accent-ink:#0d1713;--warn-bg:#3a2f10;--warn-ink:#f2d98a;--error:#ff8c82}}
+:root[data-theme="dark"]{--bg:#141a17;--surface:#1c2420;--ink:#e8eee9;--muted:#9aa8a0;--line:#2f3b35;--accent:#4fb89d;--accent-ink:#0d1713;--warn-bg:#3a2f10;--warn-ink:#f2d98a;--error:#ff8c82}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Segoe UI",system-ui,-apple-system,sans-serif}
+main{max-width:680px;margin:0 auto;padding:40px 20px 80px}
+h1{font-size:1.9rem;line-height:1.2;margin:0 0 8px}
+h2{font-size:1.2rem;margin:0}
+.lede{color:var(--muted);margin:0 0 28px}
+label{display:block;font-weight:600;margin-bottom:6px}
+textarea{width:100%;padding:12px 14px;font:inherit;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:8px;resize:vertical}
+textarea:focus-visible,button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.row{display:flex;align-items:center;gap:14px;margin:14px 0 32px;flex-wrap:wrap}
+button{font:inherit;font-weight:600;cursor:pointer;padding:10px 18px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink)}
+button:disabled{opacity:.6;cursor:progress}
+button.secondary{background:transparent;color:var(--accent);padding:6px 14px}
+#status{color:var(--muted);font-size:.95rem}
+#status.error{color:var(--error)}
+.result-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.warning{background:var(--warn-bg);color:var(--warn-ink);padding:10px 14px;border-radius:8px;font-size:.95rem;margin:0 0 12px}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;gap:12px;align-items:flex-start;padding:14px 0;border-top:1px solid var(--line)}
+li:last-child{border-bottom:1px solid var(--line)}
+li input{margin-top:5px;width:18px;height:18px;accent-color:var(--accent)}
+.task{font-weight:600}
+.meta{color:var(--muted);font-size:.92rem}
+li.done .task{text-decoration:line-through;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Meeting notes to action items</h1>
+  <p class="lede">Paste your notes or transcript. You get a checklist of who does what by when.</p>
+  <label for="notes">Meeting notes</label>
+  <textarea id="notes" rows="10" placeholder="Priya will send the revised budget by Friday. Tom to book the venue before the 15th..."></textarea>
+  <div class="row">
+    <button id="extract" type="button">Extract action items</button>
+    <span id="status" role="status" aria-live="polite"></span>
+  </div>
+  <section id="result" hidden>
+    <div class="result-head"><h2>Action items</h2><button id="copy" type="button" class="secondary">Copy checklist</button></div>
+    <p id="warning" class="warning" hidden></p>
+    <ul id="list"></ul>
+  </section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const notesEl=$("notes"),btn=$("extract"),statusEl=$("status"),result=$("result"),list=$("list"),warning=$("warning");
+let current=[];
+
+const PROMPT=`Extract action items from the meeting notes below.
+Return ONLY a JSON array, no prose, no markdown fences. Each item:
+{"owner": "<person's name exactly as written in the notes, or null>", "task": "<what they must do>", "due": "<deadline as written in the notes, or null>"}
+Rules: only use names that literally appear in the notes; never invent people. Use null if no owner or no deadline is stated. Skip discussion points that are not tasks.
+
+NOTES:
+`;
+
+function nameInNotes(name,notes){
+  return name.toLowerCase().split(/\s+/).filter(Boolean).every(part=>{
+    const esc=part.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    return new RegExp("(^|[^\\p{L}\\p{N}])"+esc+"($|[^\\p{L}\\p{N}])","iu").test(notes);
+  });
+}
+function render(){
+  list.innerHTML="";
+  current.forEach(item=>{
+    const li=document.createElement("li");
+    const cb=document.createElement("input");cb.type="checkbox";
+    cb.addEventListener("change",()=>li.classList.toggle("done",cb.checked));
+    const body=document.createElement("div");
+    const task=document.createElement("div");task.className="task";task.textContent=item.task;
+    const meta=document.createElement("div");meta.className="meta";
+    meta.textContent=(item.owner||"Unassigned")+" \u00b7 "+(item.due||"No deadline");
+    body.append(task,meta);li.append(cb,body);list.append(li);
+  });
+}
+function fail(msg){statusEl.textContent=msg;statusEl.className="error"}
+
+btn.addEventListener("click",async()=>{
+  const notes=notesEl.value.trim();
+  statusEl.className="";
+  if(!notes){return fail("Paste some notes first.")}
+  btn.disabled=true;statusEl.textContent="Reading your notes...";result.hidden=true;
+  try{
+    const sample=await window.claude.use("sample");
+    if(!sample){throw new Error("The AI feature isn\u2019t available in this view. Open the page from its claude.ai link.")}
+    const out=await sample(PROMPT+notes);
+    const text=out.text.replace(/```json|```/g,"").trim();
+    const items=JSON.parse(text);
+    if(!Array.isArray(items))throw new Error("Unexpected answer. Try again.");
+
+    const rejected=new Set();
+    current=items.filter(i=>i&&i.task).map(i=>{
+      if(i.owner&&!nameInNotes(String(i.owner),notes)){rejected.add(i.owner);return{...i,owner:null}}
+      return i;
+    });
+    warning.hidden=rejected.size===0;
+    if(rejected.size){warning.textContent="Removed "+rejected.size+" name(s) not found in your notes: "+[...rejected].join(", ")+". Those tasks are marked Unassigned."}
+    render();result.hidden=false;
+    statusEl.textContent=current.length?current.length+" action item(s) found.":"No action items found.";
+  }catch(err){
+    if(err&&err.code==="not_granted")fail("Permission was declined, so the AI can\u2019t read your notes.");
+    else if(err&&err.code==="rate_limited")fail("Too many requests. Wait a moment and try again.");
+    else if(err instanceof SyntaxError)fail("The answer was unreadable. Try again.");
+    else fail((err&&err.message)||"Something went wrong.");
+  }finally{btn.disabled=false}
+});
+
+$("copy").addEventListener("click",async()=>{
+  const text=current.map(i=>"[ ] "+i.task+" ("+(i.owner||"Unassigned")+", "+(i.due||"no deadline")+")").join("\n");
+  let label="Copied";
+  try{await navigator.clipboard.writeText(text)}catch(e){
+    const ta=document.createElement("textarea");ta.value=text;document.body.append(ta);ta.select();
+    try{document.execCommand("copy")}catch(e2){label="Copy failed"}ta.remove();
+  }
+  $("copy").textContent=label;setTimeout(()=>$("copy").textContent="Copy checklist",1800);
+});
+</script>
+</body>
+</html>
